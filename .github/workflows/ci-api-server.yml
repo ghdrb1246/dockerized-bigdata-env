@@ -1,0 +1,65 @@
+# api-server(Spring Boot) 전용 CI. 이전 프로젝트(MetroTrip)의
+# ci-backend.yml 구조를 그대로 따른다: develop push + main/develop
+# 대상 PR에서 테스트만 돈다. main push(=CD)는 이 파일을 workflow_call로
+# 재사용하지 않고 cd-main.yml이 test-api-server 잡을 자체적으로
+# 인라인한다 — main 파이프라인이 이 파일의 변경에 영향받지 않고
+# 독립적으로 동작하게 하기 위해서다(MetroTrip cd-main.yml 상단 주석과
+# 동일한 이유). 그래서 여기 검증 스텝을 고치면 cd-main.yml의
+# test-api-server 잡도 같이 봐야 한다.
+#
+# MetroTrip backend CI와 다른 점: application.yml의 datasource/redis/
+# kafka 설정이 전부 `${VAR:기본값}` 형태로 기본값을 갖고 있어(예:
+# `${DB_HOST:localhost}`), 더미 DB URL 같은 CI 전용 환경변수를 주입할
+# 필요가 없다. 또 지금 단계에는 Java용 린터(ruff에 대응하는 도구,
+# 예: Checkstyle/Spotless)가 아직 설정되어 있지 않아 lint 스텝은 없다
+# — 도입하면 이 파일에 추가한다.
+name: api-server CI
+
+on:
+  push:
+    branches: ["develop"]
+    paths:
+      - "api-server/**"
+      - ".github/workflows/ci-api-server.yml"
+  pull_request:
+    branches: ["main", "develop"]
+    paths:
+      - "api-server/**"
+      - ".github/workflows/ci-api-server.yml"
+  workflow_call:  # 필요하면 다른 워크플로우가 게이트로 재사용할 수 있게 남겨둠 (현재 호출하는 곳 없음)
+  workflow_dispatch:  # Actions 탭에서 수동 실행 가능
+
+# 같은 브랜치/PR에 새 커밋이 올라오면 이전 실행은 취소해 러너 낭비를 막는다.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        working-directory: ./api-server
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          # api-server/Dockerfile(maven:3.9-eclipse-temurin-17)과 같은
+          # Java 버전을 쓴다. 어긋나면 CI가 통과한 코드가 배포에서
+          # 다르게 돌 수 있다.
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+          cache-dependency-path: api-server/pom.xml
+
+      - name: Run tests with Maven
+        run: mvn -B test

@@ -1,0 +1,4 @@
+# 테스트 전용 의존성 (운영 이미지에는 포함하지 않음 — Dockerfile은
+# requirements.txt만 설치한다). CI에서 `pip install -r requirements.txt
+# -r requirements-dev.txt` 로 함께 설치해 pytest를 실행한다.
+pytest==8.3.3

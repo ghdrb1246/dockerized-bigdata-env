@@ -1,0 +1,66 @@
+# inference-service(Python/FastAPI) 전용 CI. ci-api-server.yml과 같은
+# 구조: develop push + main/develop 대상 PR에서 테스트만 돈다.
+# main push(=CD)는 cd-main.yml이 test-inference-service 잡을
+# 자체적으로 인라인한다(ci-api-server.yml 상단 주석의 이유와 동일) —
+# 여기 검증 스텝을 고치면 cd-main.yml의 test-inference-service 잡도
+# 같이 봐야 한다.
+#
+# tests/test_consumer.py는 infer_rule_based() 순수 함수만 검증하고
+# 실제 Kafka/Redis에는 접속하지 않으므로, MetroTrip backend CI의
+# 더미 DB URL 같은 CI 전용 환경변수가 필요 없다. requirements-dev.txt
+# (pytest만 포함, 운영 이미지에는 설치 안 됨)를 requirements.txt와
+# 함께 설치한다. 지금 단계에는 Python 린터(ruff 등)가 설정되어 있지
+# 않아 lint 스텝은 없다 — 도입하면 이 파일에 추가한다.
+name: inference-service CI
+
+on:
+  push:
+    branches: ["develop"]
+    paths:
+      - "inference-service/**"
+      - ".github/workflows/ci-inference-service.yml"
+  pull_request:
+    branches: ["main", "develop"]
+    paths:
+      - "inference-service/**"
+      - ".github/workflows/ci-inference-service.yml"
+  workflow_call:  # 필요하면 다른 워크플로우가 게이트로 재사용할 수 있게 남겨둠 (현재 호출하는 곳 없음)
+  workflow_dispatch:  # Actions 탭에서 수동 실행 가능
+
+# 같은 브랜치/PR에 새 커밋이 올라오면 이전 실행은 취소해 러너 낭비를 막는다.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        working-directory: ./inference-service
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # inference-service/Dockerfile(python:3.11-slim)과 같은
+          # 버전을 쓴다.
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            inference-service/requirements.txt
+            inference-service/requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run tests with pytest
+        run: pytest -v

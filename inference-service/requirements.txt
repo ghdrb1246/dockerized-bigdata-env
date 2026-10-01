@@ -1,0 +1,11 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+redis==5.0.8
+kafka-python==2.0.2
+
+# 테스트 LSTM 모델(app/model.py, train_test_model.py)용. 이 프로젝트에는
+# GPU가 없으므로 Dockerfile에서 CPU 전용 wheel(다운로드 용량이 훨씬
+# 작음, https://download.pytorch.org/whl/cpu)을 우선하도록 별도
+# --extra-index-url을 지정한다 — requirements.txt만으로 pip install
+# 하면(로컬 개발 등) 환경에 맞는 기본 wheel(CPU 또는 CUDA)이 설치된다.
+torch>=2.4

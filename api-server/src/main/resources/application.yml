@@ -1,0 +1,60 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: api-server
+
+  # 외부 로컬 환경에 구축된 MySQL에 접속한다 (컨테이너화하지 않음).
+  # DB_HOST/DB_PORT 등은 .env 파일(compose의 env_file)로 주입된다.
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:posture_app}?useSSL=false&serverTimezone=Asia/Seoul
+    username: ${DB_USER:posture_app}
+    password: ${DB_PASSWORD:}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      # DB가 아직 안 떠 있어도 애플리케이션 컨텍스트 시작은 막지 않는다.
+      # (연결 재시도는 /actuator/health 가 계속 감시)
+      initialization-fail-timeout: -1
+      connection-timeout: 5000
+      maximum-pool-size: 5
+
+  data:
+    redis:
+      host: ${REDIS_HOST:redis}
+      port: ${REDIS_PORT:6379}
+      timeout: 3000ms
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:kafka:19092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # 단일 브로커(KRaft) 테스트 환경 기준. 컨트롤러가 죽지 않는 한 재시도로 충분.
+      acks: all
+      retries: 3
+
+# 애플리케이션 자체 설정 (posture 도메인)
+app:
+  kafka:
+    topic:
+      posture-summary: ${POSTURE_SUMMARY_TOPIC:posture.summary}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+      # 세 구성요소(db/redis/kafka) 각각의 상태를 개별적으로 노출한다.
+      probes:
+        enabled: true
+  health:
+    db:
+      enabled: true
+    redis:
+      enabled: true
+    kafka:
+      enabled: true
