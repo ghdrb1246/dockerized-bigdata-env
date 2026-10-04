@@ -33,12 +33,31 @@ spring:
       # 단일 브로커(KRaft) 테스트 환경 기준. 컨트롤러가 죽지 않는 한 재시도로 충분.
       acks: all
       retries: 3
+    consumer:
+      # posture-cep(Python)이 쓰던 설정과 동일하게 맞춘다 — PostureInferenceConsumer
+      # (D-13)가 posture.inference를 구독한다. 테스트 단계라 earliest 유지.
+      group-id: ${POSTURE_INFERENCE_CONSUMER_GROUP:api-server-cep}
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
 
 # 애플리케이션 자체 설정 (posture 도메인)
 app:
   kafka:
     topic:
       posture-summary: ${POSTURE_SUMMARY_TOPIC:posture.summary}
+      posture-inference: ${POSTURE_INFERENCE_TOPIC:posture.inference}
+
+# posture-cep(Python) 상태머신을 이식하면서 그대로 옮긴 파라미터
+# (2026-10-02 아키텍처 v4 전환 결정, D-13). 값은 VM에서 이미 검증된
+# 지속(3s)/회복(3s)/재알림(60s)을 잠정 유지 — 팀 회의에서 다른 값으로
+# 확정되면 그때 바꾼다(아키텍처_v4_검토의견_2026-10-02.md 참고).
+cep:
+  persist-seconds: ${CEP_PERSIST_SECONDS:3}
+  recovery-seconds: ${CEP_RECOVERY_SECONDS:3}
+  realert-seconds: ${CEP_REALERT_SECONDS:60}
+  session-timeout-seconds: ${CEP_SESSION_TIMEOUT_SECONDS:300}
+  session-expiry-interval-seconds: ${CEP_SESSION_EXPIRY_INTERVAL_SECONDS:60}
 
 management:
   endpoints:
