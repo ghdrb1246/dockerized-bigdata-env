@@ -17,9 +17,10 @@ spring:
       # (연결 재시도는 /actuator/health 가 계속 감시)
       initialization-fail-timeout: -1
       connection-timeout: 5000
-      # T-09(DN-25) 결론: 단일 컨슈머 스레드 구조에서는 5개로 충분. D-15(후보 3,
-      # 컨슈머 concurrency 증설) 적용 시 concurrency + REST/헬스체크 여유분으로 재조정.
-      maximum-pool-size: 5
+      # (D-15) 동시에 DB를 쓰는 주체: posture.inference 컨슈머 스레드(기본 3)
+      # + 세션 만료 스케줄러(1) + 헬스체크(1) = 5. 여유를 두어 8.
+      # 컨슈머 concurrency를 올리면 이 값도 함께 올린다(DB max_connections=151).
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:8}
       # (D-11) 기본값에 기대지 않고 커넥션 수명 관련 값을 명시한다.
       pool-name: posture-app-pool
       # 커넥션 최대 수명 30분 — DB의 wait_timeout(기본 8시간)보다 반드시 짧게.
@@ -59,6 +60,8 @@ app:
     topic:
       posture-summary: ${POSTURE_SUMMARY_TOPIC:posture.summary}
       posture-inference: ${POSTURE_INFERENCE_TOPIC:posture.inference}
+    # (D-15) posture.inference 컨슈머 스레드 수 = 토픽 파티션 수와 맞출 것
+    posture-inference-concurrency: ${POSTURE_INFERENCE_CONCURRENCY:3}
 
 # posture-cep(Python) 상태머신을 이식하면서 그대로 옮긴 파라미터
 # (2026-10-02 아키텍처 v4 전환 결정, D-13). 값은 VM에서 이미 검증된

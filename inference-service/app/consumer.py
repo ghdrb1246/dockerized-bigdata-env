@@ -127,6 +127,16 @@ def infer_rule_based(event: dict) -> dict:
     }
 
 
+def _partition_key(result: dict) -> Optional[str]:
+    """posture.inference 메시지 키 (D-15).
+
+    v4 메시지 규격 1장에 따라 userId를 키로 쓴다. userId가 비어 있는
+    예외적인 메시지는 sessionId로 대신한다 — 최소한 같은 세션의 순서는
+    지켜야 상태머신 판정이 깨지지 않기 때문이다.
+    """
+    return result.get("userId") or result.get("sessionId")
+
+
 def run_inference(event: dict) -> dict:
     """
     이벤트 하나를 처리하는 진입점. 세션별 슬라이딩 윈도우에
@@ -220,6 +230,13 @@ class PostureSummaryConsumer:
             self._producer = KafkaProducer(
                 bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
                 value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+                # (D-15) 메시지 키 = userId (v4 메시지 규격 1장). posture.inference를
+                # 여러 파티션으로 늘리면 키가 없는 메시지는 파티션에 흩어져
+                # 같은 세션의 추론 결과가 서로 다른 컨슈머 스레드에서 순서
+                # 없이 처리된다 — 상태머신(지속·회복 판정)이 깨진다. 키를
+                # 주면 같은 사용자의 메시지는 항상 같은 파티션으로 가서
+                # 순서가 보장된다.
+                key_serializer=lambda k: k.encode("utf-8") if k is not None else None,
                 # posture-cep은 부가 판정 계층이라 발행 실패로 컨슈머 루프
                 # 전체를 막을 필요는 없다 — 재시도는 최소로, 타임아웃은
                 # 짧게 잡아 컨슈머 처리 지연을 최소화한다.
@@ -272,7 +289,11 @@ class PostureSummaryConsumer:
         if self._producer is None:
             return
         try:
-            self._producer.send(POSTURE_INFERENCE_TOPIC, value=result)
+            self._producer.send(
+                POSTURE_INFERENCE_TOPIC,
+                key=_partition_key(result),
+                value=result,
+            )
         except KafkaError as exc:  # noqa: BLE001 - 발행 실패는 로그만 남기고 계속
             logger.warning("posture.inference 발행 실패 (sessionId=%s): %s", result.get("sessionId"), exc)
 

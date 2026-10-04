@@ -39,9 +39,19 @@ public class PostureInferenceConsumer {
         this.jsonMapper = jsonMapper;
     }
 
+    /*
+     * (D-15) concurrency = 컨슈머 스레드 수. posture.inference 파티션 수와
+     * 같게 맞춘다(스레드가 파티션보다 많으면 남는 스레드는 놀기만 한다).
+     * 파티션 하나는 항상 스레드 하나만 읽으므로, 같은 키(userId)의 메시지는
+     * 여전히 순서대로 처리된다. 서로 다른 사용자는 병렬로 처리되어 DB
+     * 커밋 대기가 겹친다 — 단일 스레드 직렬 처리 병목(DN-25)의 해소책.
+     * PostureCepEngine은 내부 lock으로 보호되고, lock 안에서는 메모리
+     * 연산만 하므로(DB 쓰기는 lock 밖) 스레드 간 경합은 무시할 수준이다.
+     */
     @KafkaListener(
             topics = "${app.kafka.topic.posture-inference:posture.inference}",
-            groupId = "${spring.kafka.consumer.group-id:api-server-cep}")
+            groupId = "${spring.kafka.consumer.group-id:api-server-cep}",
+            concurrency = "${app.kafka.posture-inference-concurrency:3}")
     public void onMessage(String rawValue) {
         Map<String, Object> raw;
         try {
