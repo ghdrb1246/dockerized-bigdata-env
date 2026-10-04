@@ -17,7 +17,19 @@ spring:
       # (연결 재시도는 /actuator/health 가 계속 감시)
       initialization-fail-timeout: -1
       connection-timeout: 5000
+      # T-09(DN-25) 결론: 단일 컨슈머 스레드 구조에서는 5개로 충분. D-15(후보 3,
+      # 컨슈머 concurrency 증설) 적용 시 concurrency + REST/헬스체크 여유분으로 재조정.
       maximum-pool-size: 5
+      # (D-11) 기본값에 기대지 않고 커넥션 수명 관련 값을 명시한다.
+      pool-name: posture-app-pool
+      # 커넥션 최대 수명 30분 — DB의 wait_timeout(기본 8시간)보다 반드시 짧게.
+      # DB가 먼저 끊은 커넥션을 풀이 꺼내 쓰다 실패하는 일을 막는다.
+      max-lifetime: 1800000
+      # 유휴 커넥션에 5분마다 가벼운 ping — 공유기/방화벽이 오래 놀던 TCP
+      # 연결을 조용히 끊는 경우를 대비. max-lifetime보다 짧아야 한다.
+      keepalive-time: 300000
+      # 커넥션 유효성 검사 대기 상한 (connection-timeout보다 짧게)
+      validation-timeout: 3000
 
   data:
     redis:
@@ -70,6 +82,18 @@ management:
       # 세 구성요소(db/redis/kafka) 각각의 상태를 개별적으로 노출한다.
       probes:
         enabled: true
+      # (D-11) 헬스 그룹 분리
+      #  - liveness  (/actuator/health/liveness):  "프로세스가 살아있나"만 본다.
+      #    컨테이너 헬스체크(docker-compose)와 향후 K8s livenessProbe가 쓴다.
+      #    외부 DB가 잠깐 끊겨도 컨테이너가 unhealthy/재시작되지 않게 하려는 것.
+      #  - readiness (/actuator/health/readiness): 트래픽을 받아도 되나 — DB/Redis
+      #    의존성까지 포함. 향후 K8s readinessProbe용.
+      #  - 전체(/actuator/health)는 지금처럼 모든 구성요소 상세를 보는 모니터링용.
+      group:
+        liveness:
+          include: livenessState
+        readiness:
+          include: readinessState,db,redis
   health:
     db:
       enabled: true

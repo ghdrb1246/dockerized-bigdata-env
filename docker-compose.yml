@@ -254,8 +254,11 @@ services:
         condition: service_healthy
     networks:
       - app-network
+    # (D-11) liveness만 본다 — 외부 DB(192.168.0.42) 일시 장애가 컨테이너
+    # unhealthy로 번지지 않게. DB/Redis 상태는 /actuator/health(전체) 또는
+    # /actuator/health/readiness로 따로 확인한다.
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health/liveness || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 10
