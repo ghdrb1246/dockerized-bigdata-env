@@ -2,6 +2,7 @@ package com.posture.api.posture.cep;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -25,6 +26,13 @@ import java.util.concurrent.locks.ReentrantLock;
  *
  * 원본과 마찬가지로 이벤트 도착 순서(Kafka 오프셋)가 아니라 이벤트에
  * 담긴 {@code capturedAt}을 기준으로 지속시간을 계산한다.
+ *
+ * (D-04) 세션 상태는 메모리 맵을 캐시로 쓰고, 판정 상태가 바뀔 때마다
+ * {@link CepStateStore}(운영: Redis {@code posture:state:{userId}})에도 기록한다.
+ * api-server가 재시작돼 메모리에 없는 세션의 메시지가 오면 저장소에서
+ * 복원해 판정을 이어간다. 저장소 I/O는 lock 밖에서 한다 — 같은 사용자의
+ * 메시지는 항상 같은 파티션/스레드에서 처리되므로(D-15, 키=userId)
+ * lock 밖에서 써도 한 사용자의 쓰기 순서는 보장된다.
  */
 @Component
 public class PostureCepEngine {
@@ -37,18 +45,30 @@ public class PostureCepEngine {
     private final double persistSeconds;
     private final double recoverySeconds;
     private final double realertSeconds;
+    private final double sessionTimeoutSeconds;
+    private final CepStateStore stateStore;
 
     private final Map<String, SessionState> sessions = new HashMap<>();
     private final List<CollapseEvent> completedEvents = new ArrayList<>();
     private final ReentrantLock lock = new ReentrantLock();
 
+    /** 단위 테스트용 — 외부 저장소 없이 메모리에만 상태를 둔다(기존 동작). */
+    public PostureCepEngine(double persistSeconds, double recoverySeconds, double realertSeconds) {
+        this(persistSeconds, recoverySeconds, realertSeconds, 300, CepStateStore.NO_OP);
+    }
+
+    @Autowired
     public PostureCepEngine(
             @Value("${cep.persist-seconds:3}") double persistSeconds,
             @Value("${cep.recovery-seconds:3}") double recoverySeconds,
-            @Value("${cep.realert-seconds:60}") double realertSeconds) {
+            @Value("${cep.realert-seconds:60}") double realertSeconds,
+            @Value("${cep.session-timeout-seconds:300}") double sessionTimeoutSeconds,
+            CepStateStore stateStore) {
         this.persistSeconds = persistSeconds;
         this.recoverySeconds = recoverySeconds;
         this.realertSeconds = realertSeconds;
+        this.sessionTimeoutSeconds = sessionTimeoutSeconds;
+        this.stateStore = stateStore;
     }
 
     /**
@@ -70,19 +90,82 @@ public class PostureCepEngine {
         }
 
         boolean isCandidate = !NORMAL_STATUS.equals(inferredStatus) && !UNKNOWN_STATUS.equals(inferredStatus);
+        String stateKey = stateKey(event.userId(), sessionId);
 
+        // (D-04) 메모리에 없는 세션이면(첫 메시지 또는 재시작 직후) 저장소에서 복원 시도.
+        // 저장소 I/O는 lock 밖에서 한다.
+        boolean known;
         lock.lock();
         try {
-            SessionState state = sessions.computeIfAbsent(sessionId, id -> new SessionState());
-            state.lastSeen = now;
-
-            if (isCandidate) {
-                return handleCandidate(sessionId, event, state, now);
-            }
-            return handleNormal(sessionId, state, now);
+            known = sessions.containsKey(sessionId);
         } finally {
             lock.unlock();
         }
+        SessionState restored = known ? null : restore(stateKey, sessionId, now);
+
+        Optional<CepOutcome> outcome;
+        PersistedSessionState before;
+        PersistedSessionState after;
+        lock.lock();
+        try {
+            SessionState state = sessions.get(sessionId);
+            if (state == null) {
+                state = restored != null ? restored : new SessionState();
+                state.stateKey = stateKey;
+                if (state.userId == null) {
+                    state.userId = event.userId();
+                }
+                sessions.put(sessionId, state);
+            }
+            before = PersistedSessionState.of(sessionId, state);
+            state.lastSeen = now;
+
+            outcome = isCandidate
+                    ? handleCandidate(sessionId, event, state, now)
+                    : handleNormal(sessionId, state, now);
+            after = PersistedSessionState.of(sessionId, state);
+        } finally {
+            lock.unlock();
+        }
+
+        // 판정 상태가 바뀐 경우에만 저장소에 반영 (정상 판정이 이어지는 동안은 쓰기 없음)
+        if (!after.sameJudgmentAs(before)) {
+            if (after.isNormal()) {
+                stateStore.delete(stateKey);
+            } else {
+                stateStore.save(stateKey, after);
+            }
+        }
+        return outcome;
+    }
+
+    static String stateKey(String userId, String sessionId) {
+        return userId != null && !userId.isBlank() ? userId : sessionId;
+    }
+
+    /**
+     * 저장소에서 세션 상태를 복원한다. 다른 세션의 상태이거나(같은 사용자가 새
+     * 세션을 시작함 — v4 규칙상 세션이 바뀌면 판정을 처음부터) 세션 타임아웃보다
+     * 오래된 상태면 버리고 키를 지운다.
+     */
+    private SessionState restore(String stateKey, String sessionId, Instant now) {
+        Optional<PersistedSessionState> stored = stateStore.load(stateKey);
+        if (stored.isEmpty()) {
+            return null;
+        }
+        PersistedSessionState s = stored.get();
+        boolean sameSession = sessionId.equals(s.sessionId());
+        boolean fresh = s.lastSeen() != null
+                && (now.toEpochMilli() - s.lastSeen().toEpochMilli()) / 1000.0 <= sessionTimeoutSeconds;
+        if (!sameSession || !fresh) {
+            log.info("저장된 상태를 버림 (key={}, 저장된 sessionId={}, 현재 sessionId={}, 마지막 수신={})",
+                    stateKey, s.sessionId(), sessionId, s.lastSeen());
+            stateStore.delete(stateKey);
+            return null;
+        }
+        log.info("저장소에서 상태 복원 (sessionId={}, state={}, alertCount={})",
+                sessionId, s.state(), s.eventAlertCount());
+        return s.toSessionState(stateKey);
     }
 
     private Optional<CepOutcome> handleCandidate(
@@ -159,6 +242,7 @@ public class PostureCepEngine {
      */
     public List<CepOutcome> expireStaleSessions(Instant now, double timeoutSeconds) {
         List<CepOutcome> outcomes = new ArrayList<>();
+        List<String> expiredKeys = new ArrayList<>();
         lock.lock();
         try {
             List<String> staleIds = new ArrayList<>();
@@ -171,6 +255,12 @@ public class PostureCepEngine {
             }
             for (String sid : staleIds) {
                 SessionState state = sessions.remove(sid);
+                // 같은 사용자의 다른(새) 세션이 아직 메모리에 있으면 그 세션이 같은 키를
+                // 쓰고 있으므로 지우지 않는다
+                if (state.stateKey != null && sessions.values().stream()
+                        .noneMatch(other -> state.stateKey.equals(other.stateKey))) {
+                    expiredKeys.add(state.stateKey);
+                }
                 if (state.activeEvent != null) {
                     CollapseEvent evt = state.activeEvent;
                     evt.endedAt = state.lastSeen;
@@ -185,6 +275,10 @@ public class PostureCepEngine {
             }
         } finally {
             lock.unlock();
+        }
+        // (D-04) 만료된 세션의 저장 상태도 정리 (lock 밖에서)
+        for (String key : expiredKeys) {
+            stateStore.delete(key);
         }
         return outcomes;
     }

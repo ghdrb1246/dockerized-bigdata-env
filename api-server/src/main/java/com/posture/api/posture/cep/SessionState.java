@@ -7,6 +7,9 @@ import java.time.Instant;
  * 가변 모델. 세션 하나의 상태머신 진행 상황을 담는다.
  */
 final class SessionState {
+    /** (D-04) 외부 저장소 키 — userId, 없으면 sessionId. */
+    String stateKey;
+    String userId;
     Instant candidateSince;
     Instant recoverySince;
     CollapseEvent activeEvent;
