@@ -76,6 +76,8 @@ cep:
   # (D-04) 상태머신 상태를 Redis posture:state:{userId}(Hash)에 저장해 api-server
   # 재시작 후에도 진행 중이던 판정을 이어간다. 키 TTL은 v4 설계(5.9절)대로 1시간.
   # false면 기존처럼 메모리에만 둔다(Redis 장애 시에도 판정은 메모리로 계속됨).
+  # (D-16) /cep/events/recent 조회용으로 메모리에 남겨둘 최근 종료 이벤트 수
+  recent-events-capacity: ${CEP_RECENT_EVENTS_CAPACITY:1000}
   state-store:
     enabled: ${CEP_STATE_STORE_ENABLED:true}
     ttl-seconds: ${CEP_STATE_TTL_SECONDS:3600}

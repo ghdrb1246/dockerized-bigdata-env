@@ -8,6 +8,7 @@ import org.springframework.stereotype.Component;
 
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -49,7 +50,13 @@ public class PostureCepEngine {
     private final CepStateStore stateStore;
 
     private final Map<String, SessionState> sessions = new HashMap<>();
-    private final List<CollapseEvent> completedEvents = new ArrayList<>();
+    /**
+     * (D-16) 최근 종료된 붕괴 이벤트 — {@code /cep/events/recent} 조회 전용. 예전에는 지우지 않고
+     * 계속 쌓기만 해서 장시간 운영 시 메모리가 늘어났다. 이제 최근 {@code recentEventsCapacity}개만
+     * 보관한다(영구 기록은 collapse_events 테이블에 있음).
+     */
+    private final ArrayDeque<CollapseEvent> completedEvents = new ArrayDeque<>();
+    private final int recentEventsCapacity;
     private final ReentrantLock lock = new ReentrantLock();
 
     /** 단위 테스트용 — 외부 저장소 없이 메모리에만 상태를 둔다(기존 동작). */
@@ -57,18 +64,28 @@ public class PostureCepEngine {
         this(persistSeconds, recoverySeconds, realertSeconds, 300, CepStateStore.NO_OP);
     }
 
+    public PostureCepEngine(double persistSeconds, double recoverySeconds, double realertSeconds,
+                            double sessionTimeoutSeconds, CepStateStore stateStore) {
+        this(persistSeconds, recoverySeconds, realertSeconds, sessionTimeoutSeconds, stateStore,
+                DEFAULT_RECENT_EVENTS_CAPACITY);
+    }
+
+    static final int DEFAULT_RECENT_EVENTS_CAPACITY = 1000;
+
     @Autowired
     public PostureCepEngine(
             @Value("${cep.persist-seconds:3}") double persistSeconds,
             @Value("${cep.recovery-seconds:3}") double recoverySeconds,
             @Value("${cep.realert-seconds:60}") double realertSeconds,
             @Value("${cep.session-timeout-seconds:300}") double sessionTimeoutSeconds,
-            CepStateStore stateStore) {
+            CepStateStore stateStore,
+            @Value("${cep.recent-events-capacity:1000}") int recentEventsCapacity) {
         this.persistSeconds = persistSeconds;
         this.recoverySeconds = recoverySeconds;
         this.realertSeconds = realertSeconds;
         this.sessionTimeoutSeconds = sessionTimeoutSeconds;
         this.stateStore = stateStore;
+        this.recentEventsCapacity = Math.max(1, recentEventsCapacity);
     }
 
     /**
@@ -230,7 +247,7 @@ public class PostureCepEngine {
         evt.recovered = true;
         state.activeEvent = null;
         state.recoverySince = null;
-        completedEvents.add(evt);
+        rememberCompleted(evt);
         log.info("붕괴 이벤트 종료 (sessionId={}, 지속시간={}s, alertCount={})",
                 sessionId, evt.durationSeconds(), evt.alertCount);
         return Optional.of(new CepOutcome(CepOutcome.Type.EVENT_ENDED, evt));
@@ -265,7 +282,7 @@ public class PostureCepEngine {
                     CollapseEvent evt = state.activeEvent;
                     evt.endedAt = state.lastSeen;
                     evt.recovered = false;
-                    completedEvents.add(evt);
+                    rememberCompleted(evt);
                     log.info("세션 타임아웃으로 진행 중이던 붕괴 이벤트 강제 종료 (sessionId={}, 마지막 수신={})",
                             sid, state.lastSeen);
                     outcomes.add(new CepOutcome(CepOutcome.Type.EVENT_ENDED, evt));
@@ -301,12 +318,30 @@ public class PostureCepEngine {
     public List<Map<String, Object>> recentEvents(int limit) {
         lock.lock();
         try {
-            int from = Math.max(0, completedEvents.size() - limit);
+            int skip = Math.max(0, completedEvents.size() - limit);
             List<Map<String, Object>> result = new ArrayList<>();
-            for (CollapseEvent evt : completedEvents.subList(from, completedEvents.size())) {
+            for (CollapseEvent evt : completedEvents.stream().skip(skip).toList()) {
                 result.add(new CepOutcome(CepOutcome.Type.EVENT_ENDED, evt).toResponseMap());
             }
             return result;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** lock을 잡은 상태에서 호출 — 가장 오래된 것부터 버려 최근 N개만 유지한다. */
+    private void rememberCompleted(CollapseEvent evt) {
+        completedEvents.addLast(evt);
+        while (completedEvents.size() > recentEventsCapacity) {
+            completedEvents.removeFirst();
+        }
+    }
+
+    /** 테스트 전용 — 보관 중인 종료 이벤트 수. */
+    int completedEventCount() {
+        lock.lock();
+        try {
+            return completedEvents.size();
         } finally {
             lock.unlock();
         }
