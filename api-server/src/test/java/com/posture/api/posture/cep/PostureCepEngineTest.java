@@ -201,4 +201,23 @@ class PostureCepEngineTest {
         assertThat(engine.hasSession("stale")).isFalse(); // 400 - 0 = 400s >= 300s -> 만료
         assertThat(engine.hasSession("fresh")).isTrue();  // 400 - 390 = 10s < 300s -> 유지
     }
+
+    @Test
+    void completedEventsAreCappedToMostRecent() {
+        // (D-16) 보관 상한 3 — 이벤트 5개가 끝나면 최근 3개만 남는다
+        PostureCepEngine engine = new PostureCepEngine(3, 3, 60, 300, CepStateStore.NO_OP, 3);
+        for (int i = 0; i < 5; i++) {
+            String sid = "s" + i;
+            engine.handle(event(sid, "WARNING", 0.0));
+            engine.handle(event(sid, "WARNING", 3.5));
+            engine.handle(event(sid, "NORMAL", 4.0));
+            engine.handle(event(sid, "NORMAL", 7.5));
+        }
+        assertThat(engine.completedEventCount()).isEqualTo(3);
+        List<Map<String, Object>> recent = engine.recentEvents(20);
+        assertThat(recent).hasSize(3);
+        assertThat(recent.get(0).get("sessionId")).isEqualTo("s2");
+        assertThat(recent.get(2).get("sessionId")).isEqualTo("s4");
+        assertThat(engine.recentEvents(2)).hasSize(2);
+    }
 }
