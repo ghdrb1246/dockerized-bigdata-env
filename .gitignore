@@ -54,6 +54,7 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
+mysql/*.csv
 
 # Translations
 *.mo
@@ -175,3 +176,5 @@ poetry.toml
 pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python
+# (T-11) 최대 동시 접속 측정 결과 (서버 PC 로컬 기록)
+capacity-results/

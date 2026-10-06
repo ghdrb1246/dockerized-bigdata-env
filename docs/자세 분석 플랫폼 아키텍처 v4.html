@@ -1,0 +1,611 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>자세 분석 플랫폼 아키텍처 v4</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: 한 장짜리 기술 브리핑. 상단 요약 → 경계 다이어그램(파이프라인별 강조) → 경계 표 → 설계 이유 → 파이프라인 5종 → 장애 격리 */
+:root {
+  --paper: #f4f6f9;
+  --surface: #ffffff;
+  --ink: #16202c;
+  --muted: #5a6577;
+  --line: #d4dae3;
+  --line-strong: #9aa5b5;
+  --zone-in: #e9eef6;
+  --hot: #c4460f;
+  --hot-soft: #fbe9df;
+  --cold: #2c5bb0;
+  --cold-soft: #e3ebf9;
+  --edge: #707b8c;
+  --warn: #9a6400;
+  --warn-soft: #fbf1dc;
+  --font-body: "IBM Plex Sans KR", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0f141b; --surface: #161d27; --ink: #e5eaf1; --muted: #9aa5b5;
+    --line: #2a3442; --line-strong: #4d5a6c; --zone-in: #131b26;
+    --hot: #f0884a; --hot-soft: #3a2116; --cold: #7ea5ee; --cold-soft: #18243a;
+    --edge: #8a96a8; --warn: #e3b25a; --warn-soft: #32270f;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0f141b; --surface: #161d27; --ink: #e5eaf1; --muted: #9aa5b5;
+  --line: #2a3442; --line-strong: #4d5a6c; --zone-in: #131b26;
+  --hot: #f0884a; --hot-soft: #3a2116; --cold: #7ea5ee; --cold-soft: #18243a;
+  --edge: #8a96a8; --warn: #e3b25a; --warn-soft: #32270f;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--paper); color: var(--ink);
+  font-family: var(--font-body); font-size: 15px; line-height: 1.7;
+  padding-inline: 20px; padding-block: 0;
+}
+.wrap { max-width: 1160px; margin: 0 auto; padding-block: 40px 64px; display: grid; gap: 56px; }
+h1, h2, h3 { text-wrap: balance; line-height: 1.3; margin: 0; }
+h1 { font-size: clamp(26px, 4vw, 36px); font-weight: 700; letter-spacing: -0.01em; }
+h2 { font-size: 22px; font-weight: 700; }
+h3 { font-size: 16.5px; font-weight: 600; }
+p { margin: 0; }
+code, .mono { font-family: var(--font-mono); font-size: 0.88em; }
+code { background: var(--zone-in); padding: 1px 5px; border-radius: 4px; }
+.eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.06em; color: var(--muted); text-transform: uppercase; }
+.lede { color: var(--muted); max-width: 68ch; }
+section { display: grid; gap: 20px; min-width: 0; }
+.sec-head { display: grid; gap: 6px; }
+
+/* header */
+header { display: grid; gap: 14px; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 13px; color: var(--muted); }
+.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-top: 8px; }
+.summary div { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: grid; gap: 4px; min-width: 0; }
+.summary b { font-weight: 600; }
+.summary span { color: var(--muted); font-size: 13.5px; }
+
+/* diagram */
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.toolbar .lbl { font-size: 13px; color: var(--muted); margin-right: 4px; }
+.chip {
+  font: inherit; font-size: 13.5px; cursor: pointer; border-radius: 999px;
+  border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink);
+  padding: 5px 14px; transition: background .15s, border-color .15s;
+}
+.chip:hover { border-color: var(--ink); }
+.chip[aria-pressed="true"] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.chip:focus-visible, .linkbtn:focus-visible { outline: 2px solid var(--cold); outline-offset: 2px; }
+.figure { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: grid; gap: 10px; }
+.scroll { overflow-x: auto; }
+.scroll svg { display: block; width: 100%; min-width: 900px; height: auto; }
+.caption { font-size: 14px; color: var(--muted); padding: 0 6px 4px; min-height: 1.7em; }
+.caption b { color: var(--ink); font-weight: 600; }
+
+svg text { font-family: var(--font-body); }
+.zin { fill: var(--zone-in); stroke: var(--line-strong); stroke-width: 1; }
+.zext { fill: none; stroke: var(--line-strong); stroke-width: 1.2; stroke-dasharray: 6 5; }
+.zl { font-size: 13px; font-weight: 700; fill: var(--ink); }
+.zs { font-size: 11.5px; fill: var(--muted); }
+.zm { font-family: var(--font-mono) !important; font-size: 11px; fill: var(--muted); }
+.nd rect { fill: var(--surface); stroke: var(--line-strong); stroke-width: 1; }
+.nd.hub rect { stroke: var(--ink); stroke-width: 1.6; }
+.nt { font-size: 13.5px; font-weight: 600; fill: var(--ink); }
+.ns { font-size: 11.5px; fill: var(--muted); }
+.nm { font-family: var(--font-mono) !important; font-size: 11px; fill: var(--muted); }
+.e { fill: none; stroke-width: 1.7; }
+.eh { stroke: var(--hot); }
+.ec { stroke: var(--cold); stroke-dasharray: 6 4; }
+.en { stroke: var(--edge); stroke-width: 1.3; }
+.mk-h { fill: var(--hot); } .mk-c { fill: var(--cold); } .mk-n { fill: var(--edge); }
+.pl { font-family: var(--font-mono) !important; font-size: 11px; font-weight: 500; }
+.pl-h { fill: var(--hot); } .pl-c { fill: var(--cold); } .pl-n { fill: var(--edge); }
+[data-p] { transition: opacity .2s; }
+svg.focus [data-p]:not(.on) { opacity: 0.12; }
+@media (prefers-reduced-motion: reduce) { [data-p], .chip { transition: none; } }
+
+/* tables */
+.tbl-wrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; min-width: 640px; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 12.5px; font-weight: 600; color: var(--muted); background: var(--zone-in); }
+tr:last-child td { border-bottom: 0; }
+td.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tag { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 999px; white-space: nowrap; font-weight: 500; }
+.tag.in { background: var(--hot-soft); color: var(--hot); }
+.tag.out { background: var(--cold-soft); color: var(--cold); }
+.tag.lo { background: var(--zone-in); color: var(--muted); }
+
+.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.note { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; display: grid; gap: 8px; min-width: 0; }
+.note ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+
+/* old vs new */
+.compare { display: grid; gap: 14px; }
+.flow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13.5px; }
+.flow .n { background: var(--surface); border: 1px solid var(--line-strong); border-radius: 6px; padding: 3px 10px; white-space: nowrap; }
+.flow .n.bad { border-color: var(--warn); background: var(--warn-soft); color: var(--warn); font-weight: 600; }
+.flow .n.h { border-color: var(--hot); color: var(--hot); }
+.flow .n.c { border-color: var(--cold); color: var(--cold); }
+.flow .a { color: var(--muted); }
+.flowrow { display: grid; grid-template-columns: 92px 1fr; gap: 10px; align-items: start; }
+.flowrow > span { font-size: 12.5px; font-weight: 600; color: var(--muted); padding-top: 4px; }
+.flowrow > div { min-width: 0; }
+.probs { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
+.probs div { border-left: 3px solid var(--warn); padding: 4px 0 4px 12px; font-size: 14px; border-radius: 0; }
+.probs b { display: block; font-weight: 600; }
+.probs span { color: var(--muted); }
+
+.decisions { display: grid; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); gap: 12px; }
+.dc { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; display: grid; gap: 8px; align-content: start; min-width: 0; }
+.dc .id { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+.dc dl { margin: 0; display: grid; grid-template-columns: 44px 1fr; gap: 4px 10px; font-size: 13.5px; }
+.dc dt { color: var(--muted); }
+.dc dd { margin: 0; min-width: 0; }
+
+/* pipelines */
+.pipes { display: grid; gap: 16px; }
+.pipe { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px; display: grid; gap: 14px; min-width: 0; }
+.pipe-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px 16px; }
+.pipe-head .left { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; }
+.when { font-size: 13px; color: var(--muted); }
+.lane { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 999px; }
+.lane.h { background: var(--hot-soft); color: var(--hot); }
+.lane.c { background: var(--cold-soft); color: var(--cold); }
+.lane.n { background: var(--zone-in); color: var(--muted); }
+.linkbtn { font: inherit; font-size: 13px; background: none; border: 0; color: var(--cold); cursor: pointer; padding: 0; text-decoration: underline; text-underline-offset: 3px; }
+.pipe-body { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 20px; }
+@media (max-width: 760px) { .pipe-body { grid-template-columns: 1fr; } }
+ol.steps { margin: 0; padding-left: 22px; display: grid; gap: 6px; font-size: 14.5px; }
+ol.steps li::marker { font-family: var(--font-mono); color: var(--muted); font-size: 13px; }
+.side { display: grid; gap: 12px; align-content: start; font-size: 14px; }
+.side h4 { margin: 0 0 2px; font-size: 12.5px; font-weight: 600; color: var(--muted); }
+.side p { color: var(--ink); }
+
+.budget { display: grid; gap: 8px; }
+.bar { display: flex; height: 22px; border-radius: 5px; overflow: hidden; border: 1px solid var(--line-strong); background: repeating-linear-gradient(135deg, transparent 0 6px, var(--zone-in) 6px 12px); position: relative; }
+.bar i { display: block; height: 100%; }
+.bar i:nth-child(odd) { background: var(--hot); }
+.bar i:nth-child(even) { background: var(--hot); opacity: .6; }
+.scale { display: flex; justify-content: space-between; font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.blist { display: grid; grid-template-columns: 1fr auto; gap: 2px 16px; font-size: 13px; }
+.blist span:nth-child(even) { font-family: var(--font-mono); font-variant-numeric: tabular-nums; text-align: right; }
+.blist .tot { font-weight: 600; border-top: 1px solid var(--line); padding-top: 4px; }
+
+.states { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 12px; }
+.states .s { border: 1px solid var(--line-strong); border-radius: 6px; padding: 2px 8px; }
+.states .s.b { border-color: var(--hot); color: var(--hot); }
+.states .a { color: var(--muted); font-size: 11px; }
+
+footer { font-size: 13px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 16px; display: grid; gap: 4px; }
+
+@media (max-width: 520px) {
+  body { padding-inline: 16px; }
+  .wrap { gap: 44px; padding-block: 28px 48px; }
+  .pipe { padding: 16px; }
+  .flowrow { grid-template-columns: 1fr; gap: 4px; }
+}
+</style>
+
+<div class="wrap">
+
+<header>
+  <span class="eyebrow">LSTM 기반 자세 붕괴 주기 분석 및 교정 보조 시스템</span>
+  <h1>자세 분석 플랫폼 아키텍처 v4</h1>
+  <div class="meta"><span>2026-10-02</span><span>기준 문서: 전체 설계안 v4 · 아키텍처 v4.0 · Kafka 메시지 규격 v1.0</span></div>
+  <p class="lede">서버 PC 한 대가 내부를 이루고, 사용자 브라우저·모델 담당자의 GPU PC·MySQL이 외부에 있습니다. 데이터는 실시간 경로와 적재·분석 경로로 나뉘고, 두 경로는 Kafka에서 갈라집니다.</p>
+  <div class="summary">
+    <div><b>내부 = 서버 PC 1대</b><span>Ubuntu Server, 6코어 12스레드, 16GB. Spring 서비스와 Kafka·Redis·HDFS·Spark를 Docker Compose로 실행</span></div>
+    <div><b>외부 = 3곳</b><span>사용자 브라우저, 외부 GPU PC(추론 + 학습), 외부 MySQL</span></div>
+    <div><b>경계를 넘는 포트 4종</b><span>8080(앱 진입) · 9094(Kafka, GPU PC 전용) · 9870/9864(HDFS, GPU PC 전용) · 3306(MySQL로 나가는 연결)</span></div>
+    <div><b>지연 목표 1초 이내</b><span>실시간 경로 예상 약 0.6초. HDFS·Spark는 실시간 경로에 없음</span></div>
+  </div>
+</header>
+
+<section id="diagram" aria-labelledby="h-diagram">
+  <div class="sec-head">
+    <span class="eyebrow">아키텍처</span>
+    <h2 id="h-diagram">내부와 외부</h2>
+  </div>
+  <div class="toolbar" role="group" aria-label="파이프라인 강조">
+    <span class="lbl">파이프라인 강조</span>
+    <button class="chip" id="chip-all" data-k="all" aria-pressed="true">전체</button>
+    <button class="chip" id="chip-cal" data-k="cal" aria-pressed="false">캘리브레이션</button>
+    <button class="chip" id="chip-rt" data-k="rt" aria-pressed="false">실시간 판정</button>
+    <button class="chip" id="chip-load" data-k="load" aria-pressed="false">적재</button>
+    <button class="chip" id="chip-train" data-k="train" aria-pressed="false">학습·모델</button>
+    <button class="chip" id="chip-mart" data-k="mart" aria-pressed="false">통계 마트</button>
+  </div>
+  <div class="figure">
+    <div class="scroll">
+<svg id="arch" viewBox="0 0 1120 616" role="img" aria-labelledby="arch-t arch-d">
+<title id="arch-t">자세 분석 플랫폼 v4 배치도</title>
+<desc id="arch-d">서버 PC 내부에 API gateway, realtime·user·report 서비스, Redis, Kafka, cron, Spark, HDFS가 있고, 외부에 사용자 브라우저, GPU PC(추론 서비스와 학습 환경), MySQL이 있다. 브라우저는 8080, GPU PC는 Kafka 9094와 HDFS 9870·9864로 들어오고, 서버는 MySQL 3306으로 나간다.</desc>
+<defs>
+  <marker id="mh" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mk-h" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="mc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mk-c" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="mn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mk-n" d="M0 0L10 5L0 10z"/></marker>
+</defs>
+
+<!-- zones -->
+<rect class="zext" x="20" y="40" width="200" height="150" rx="10"/>
+<text class="zl" x="36" y="64">사용자 브라우저</text>
+<text class="zs" x="36" y="170">영상은 기기 밖으로 안 나감</text>
+
+<rect class="zin" x="260" y="40" width="630" height="520" rx="12"/>
+<text class="zl" x="278" y="64">서버 PC · 내부</text>
+<text class="zm" x="874" y="64" text-anchor="end">Ubuntu 24.04 · Docker Compose · app-network</text>
+<text class="zs" x="278" y="546">Redis · Kafka 9092 · Spark UI는 127.0.0.1 바인딩, 서비스 포트는 외부에 열지 않음</text>
+
+<rect class="zext" x="930" y="40" width="170" height="150" rx="10"/>
+<text class="zl" x="946" y="64">외부 DB</text>
+<text class="zm" x="1015" y="172" text-anchor="middle">user · report · Spark J3</text>
+
+<rect class="zext" x="930" y="250" width="170" height="310" rx="10"/>
+<text class="zl" x="946" y="274">외부 GPU PC</text>
+<text class="zs" x="946" y="292">모델 담당자 환경</text>
+
+<!-- edges: hot (실시간) -->
+<line class="e eh" data-p="cal rt mart" x1="222" y1="108" x2="466" y2="108" marker-end="url(#mh)"/>
+<text class="pl pl-h" data-p="cal rt mart" x="241" y="100" text-anchor="middle">:8080</text>
+<path class="e en" data-p="cal" d="M550 136 V184" marker-end="url(#mn)"/>
+<path class="e en" data-p="mart" d="M550 160 H730 V184" marker-end="url(#mn)"/>
+<path class="e eh" data-p="rt" d="M550 136 V160 H370 V184" marker-end="url(#mh)"/>
+<line class="e eh" data-p="rt" x1="330" y1="248" x2="330" y2="302" marker-start="url(#mh)" marker-end="url(#mh)"/>
+<path class="e eh" data-p="rt" d="M420 248 V278 H500 V302" marker-start="url(#mh)" marker-end="url(#mh)"/>
+<line class="e en" data-p="cal" x1="550" y1="246" x2="550" y2="302" marker-end="url(#mn)"/>
+<text class="pl pl-n" data-p="cal" x="558" y="282">baselines</text>
+<line class="e en" data-p="rt" x1="730" y1="304" x2="730" y2="250" marker-end="url(#mn)"/>
+<text class="pl pl-n" data-p="rt" x="738" y="282">episodes</text>
+<line class="e eh" data-p="cal rt" x1="814" y1="346" x2="941" y2="346" marker-start="url(#mh)" marker-end="url(#mh)"/>
+<text class="pl pl-h" data-p="cal rt" x="851" y="338" text-anchor="middle">:9094</text>
+<path class="e en" data-p="rt mart" d="M812 216 H905 V116 H941" marker-end="url(#mn)"/>
+<text class="pl pl-n" data-p="rt mart" x="851" y="208" text-anchor="middle">:3306</text>
+
+<!-- edges: cold (적재·분석) -->
+<line class="e ec" data-p="load" x1="550" y1="388" x2="550" y2="466" marker-end="url(#mc)"/>
+<text class="pl pl-c" data-p="load" x="558" y="432">J1 매시간</text>
+<line class="e ec" data-p="load train mart" x1="452" y1="498" x2="466" y2="498" marker-end="url(#mc)"/>
+<line class="e ec" data-p="load train mart" x1="632" y1="498" x2="646" y2="498" marker-end="url(#mc)"/>
+<line class="e ec" data-p="train" x1="814" y1="498" x2="941" y2="498" marker-start="url(#mc)" marker-end="url(#mc)"/>
+<text class="pl pl-c" data-p="train" x="851" y="488" text-anchor="middle">:9870·9864</text>
+
+<!-- nodes -->
+<g class="nd" data-p="cal rt mart"><rect x="40" y="80" width="160" height="56" rx="7"/>
+  <text class="nt" x="120" y="103" text-anchor="middle">React FE</text>
+  <text class="ns" x="120" y="122" text-anchor="middle">키포인트 추출 · 알림</text></g>
+
+<g class="nd" data-p="cal rt mart"><rect x="470" y="80" width="160" height="56" rx="7"/>
+  <text class="nt" x="550" y="103" text-anchor="middle">API gateway</text>
+  <text class="ns" x="550" y="122" text-anchor="middle">JWT · 라우팅 · WS 프록시</text></g>
+
+<g class="nd" data-p="rt"><rect x="290" y="188" width="160" height="58" rx="7"/>
+  <text class="nt" x="370" y="211" text-anchor="middle">realtime-service</text>
+  <text class="ns" x="370" y="230" text-anchor="middle">WebSocket · 상태머신</text></g>
+<g class="nd" data-p="cal"><rect x="470" y="188" width="160" height="58" rx="7"/>
+  <text class="nt" x="550" y="211" text-anchor="middle">user-service</text>
+  <text class="ns" x="550" y="230" text-anchor="middle">인증 · 캘리브레이션</text></g>
+<g class="nd" data-p="rt mart"><rect x="650" y="188" width="160" height="58" rx="7"/>
+  <text class="nt" x="730" y="211" text-anchor="middle">report-service</text>
+  <text class="ns" x="730" y="230" text-anchor="middle">기록 저장 · 통계 조회</text></g>
+
+<g class="nd" data-p="rt"><rect x="290" y="306" width="160" height="80" rx="7"/>
+  <text class="nt" x="370" y="338" text-anchor="middle">Redis</text>
+  <text class="ns" x="370" y="358" text-anchor="middle">상태 · 최신 결과 · Pub/Sub</text></g>
+<g class="nd hub" data-p="cal rt load"><rect x="470" y="306" width="340" height="80" rx="7"/>
+  <text class="nt" x="640" y="330" text-anchor="middle">Kafka</text>
+  <text class="ns" x="640" y="349" text-anchor="middle">KRaft 단일 브로커 · 실시간/적재 분기점</text>
+  <text class="nm" x="640" y="370" text-anchor="middle">keypoints · inference · baselines · episodes · dlq</text></g>
+
+<g class="nd" data-p="load train mart"><rect x="290" y="470" width="160" height="56" rx="7"/>
+  <text class="nt" x="370" y="493" text-anchor="middle">cron</text>
+  <text class="ns" x="370" y="512" text-anchor="middle">매시간 J1 · 매일 J2, J3</text></g>
+<g class="nd" data-p="load train mart"><rect x="470" y="470" width="160" height="56" rx="7"/>
+  <text class="nt" x="550" y="493" text-anchor="middle">Spark</text>
+  <text class="ns" x="550" y="512" text-anchor="middle">배치 전용 · local[4]</text></g>
+<g class="nd" data-p="load train"><rect x="650" y="470" width="160" height="56" rx="7"/>
+  <text class="nt" x="730" y="493" text-anchor="middle">HDFS</text>
+  <text class="ns" x="730" y="512" text-anchor="middle">원본 · 학습셋 · 모델</text></g>
+
+<g class="nd" data-p="cal mart rt"><rect x="945" y="88" width="140" height="56" rx="7"/>
+  <text class="nt" x="1015" y="111" text-anchor="middle">MySQL</text>
+  <text class="ns" x="1015" y="130" text-anchor="middle">회원 · 기록 · 마트</text></g>
+
+<g class="nd" data-p="cal rt train"><rect x="945" y="318" width="140" height="56" rx="7"/>
+  <text class="nt" x="1015" y="341" text-anchor="middle">추론 서비스</text>
+  <text class="ns" x="1015" y="360" text-anchor="middle">Python · LSTM</text></g>
+<g class="nd" data-p="train"><rect x="945" y="470" width="140" height="56" rx="7"/>
+  <text class="nt" x="1015" y="493" text-anchor="middle">학습 환경</text>
+  <text class="ns" x="1015" y="512" text-anchor="middle">GPU · 모델 v{n}</text></g>
+
+<!-- legend -->
+<line class="e eh" x1="20" y1="596" x2="56" y2="596"/>
+<text class="zs" x="64" y="600">실시간 경로</text>
+<line class="e ec" x1="160" y1="596" x2="196" y2="596"/>
+<text class="zs" x="204" y="600">적재·분석 경로 (배치)</text>
+<line class="e en" x1="350" y1="596" x2="386" y2="596"/>
+<text class="zs" x="394" y="600">요청·이벤트</text>
+<rect class="zext" x="490" y="588" width="30" height="16" rx="3"/>
+<text class="zs" x="528" y="600">외부 장비</text>
+<rect class="zin" x="610" y="588" width="30" height="16" rx="3"/>
+<text class="zs" x="648" y="600">서버 PC 내부</text>
+<text class="pl pl-n" x="740" y="600">:포트 = 경계를 넘는 지점</text>
+</svg>
+    </div>
+    <p class="caption" id="caption" aria-live="polite"><b>전체 구성.</b> 위 버튼으로 파이프라인을 고르면 그 흐름에 쓰이는 구성요소만 강조됩니다.</p>
+  </div>
+</section>
+
+<section aria-labelledby="h-boundary">
+  <div class="sec-head">
+    <span class="eyebrow">경계</span>
+    <h2 id="h-boundary">경계를 넘는 연결은 이것뿐</h2>
+    <p class="lede">내부 서비스끼리는 Docker 네트워크의 서비스 이름으로 통신하고, 외부와는 아래 다섯 개 연결만 엽니다.</p>
+  </div>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>연결</th><th>방향</th><th>포트</th><th>허용 대상</th><th>오가는 것</th></tr></thead>
+      <tbody>
+        <tr><td>브라우저 → API gateway</td><td><span class="tag in">들어옴</span></td><td class="num">8080</td><td>LAN 전체</td><td>REST(로그인·캘리브레이션·기록), WebSocket(키포인트·알림)</td></tr>
+        <tr><td>GPU PC ↔ Kafka</td><td><span class="tag in">들어옴</span></td><td class="num">9094</td><td>GPU PC IP만</td><td>keypoints·baselines 소비, inference 발행</td></tr>
+        <tr><td>GPU PC ↔ HDFS</td><td><span class="tag in">들어옴</span></td><td class="num">9870, 9864</td><td>GPU PC IP만</td><td>학습셋 읽기, 모델 <code>/models/v{n}</code> 업로드</td></tr>
+        <tr><td>서버 PC → MySQL</td><td><span class="tag out">나감</span></td><td class="num">3306</td><td>user·report·Spark J3</td><td>회원, 기준자세 원본, 에피소드 기록, 통계 마트</td></tr>
+        <tr><td>팀원 → 서버 PC</td><td><span class="tag in">들어옴</span></td><td class="num">22</td><td>SSH 키 인증만</td><td>운영·배포</td></tr>
+        <tr><td>Redis, Kafka 9092, Spark UI 4040</td><td><span class="tag lo">내부 전용</span></td><td class="num">127.0.0.1</td><td>서버 PC 안</td><td>외부 확인이 필요하면 SSH 터널</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="two">
+    <div class="note">
+      <h3>왜 이렇게 나눴나</h3>
+      <ul>
+        <li>GPU PC가 붙는 곳을 Kafka 9094 하나로 좁혔습니다. 추론 서비스는 Redis와 MySQL을 몰라도 됩니다(기준자세는 compacted 토픽으로 전달).</li>
+        <li>실시간 경로가 경계를 넘는 곳은 8080과 9094 두 군데뿐입니다. 나머지 실시간 처리는 서버 PC 안에서 끝납니다.</li>
+        <li>MySQL을 밖에 두어 서버 PC를 재설치하거나 장애가 나도 영속 데이터는 남습니다.</li>
+      </ul>
+    </div>
+    <div class="note">
+      <h3>설정할 때 주의</h3>
+      <ul>
+        <li>Docker가 연 포트는 ufw를 우회합니다. 내부 전용은 <code>127.0.0.1:</code>로 바인딩하고, GPU PC 전용 포트는 <code>DOCKER-USER</code> 체인에서 IP를 제한합니다.</li>
+        <li>Kafka에 <code>EXTERNAL://&lt;서버IP&gt;:9094</code> 리스너를 추가합니다. 컨테이너끼리는 <code>kafka:19092</code>를 씁니다.</li>
+        <li>GPU PC hosts 파일에 <code>&lt;서버IP&gt; namenode datanode</code>를 넣어야 WebHDFS 리다이렉트가 동작합니다.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section aria-labelledby="h-why">
+  <div class="sec-head">
+    <span class="eyebrow">설계 이유</span>
+    <h2 id="h-why">처음 구상에서 무엇을 바꿨나</h2>
+  </div>
+  <div class="note compare">
+    <div class="flowrow"><span>처음 구상</span>
+      <div class="flow">
+        <span class="n">FE</span><span class="a">→</span><span class="n">BE</span><span class="a">→</span><span class="n">API</span><span class="a">→</span><span class="n">Kafka</span><span class="a">→</span><span class="n bad">HDFS · Redis · Spark</span><span class="a">→</span><span class="n bad">DB</span><span class="a">→</span><span class="n">모델 서버</span><span class="a">→</span><span class="n">API</span><span class="a">→</span><span class="n">BE</span><span class="a">→</span><span class="n">FE</span>
+      </div></div>
+    <div class="flowrow"><span>실시간 경로</span>
+      <div class="flow">
+        <span class="n h">FE</span><span class="a">→</span><span class="n h">realtime-service</span><span class="a">→</span><span class="n h">Kafka</span><span class="a">→</span><span class="n h">추론(GPU PC)</span><span class="a">→</span><span class="n h">Kafka</span><span class="a">→</span><span class="n h">상태머신(Redis)</span><span class="a">→</span><span class="n h">FE 알림</span>
+      </div></div>
+    <div class="flowrow"><span>적재 경로</span>
+      <div class="flow">
+        <span class="n c">Kafka</span><span class="a">→</span><span class="n c">Spark J1</span><span class="a">→</span><span class="n c">HDFS</span><span class="a">→</span><span class="n c">Spark J2 · J3</span><span class="a">→</span><span class="n c">학습셋 · MySQL 마트</span>
+      </div></div>
+    <div class="probs">
+      <div><b>실시간 경로에 배치 도구</b><span>HDFS는 저장소, Spark는 배치 엔진입니다. 판정 경로 한가운데 있으면 수 초 이상 지연됩니다.</span></div>
+      <div><b>DB를 거쳐 모델에 전달</b><span>저장 후 다시 읽으면 DB가 메시지 큐 역할을 하게 되어 폴링 지연, 순서, 부하 문제가 생깁니다.</span></div>
+      <div><b>구성요소 역할 불분명</b><span>네 구성요소의 역할이 정해지지 않아 구현 범위를 나눌 수 없었습니다.</span></div>
+    </div>
+  </div>
+
+  <div class="decisions">
+    <article class="dc"><span class="id">D2</span><h3>실시간 경로와 적재 경로 분리</h3>
+      <dl><dt>대안</dt><dd>한 줄짜리 파이프라인</dd><dt>이유</dt><dd>판정 지연을 1초 이내로 유지하고, 적재·분석 장애가 실시간 서비스로 번지지 않게 합니다.</dd></dl></article>
+    <article class="dc"><span class="id">D3</span><h3>DB 경유 금지</h3>
+      <dl><dt>대안</dt><dd>DB 저장 후 모델 서버가 조회</dd><dt>이유</dt><dd>Kafka가 버퍼와 분기를 함께 맡아 지연·순서·부하 문제가 사라집니다.</dd></dl></article>
+    <article class="dc"><span class="id">D4</span><h3>추론 입력을 Kafka consumer로</h3>
+      <dl><dt>대안</dt><dd>API 서버가 HTTP로 직접 호출</dd><dt>이유</dt><dd>추론이 느려져도 데이터는 Kafka에 쌓일 뿐 유실되지 않습니다. 외부 PC와 연결 지점이 포트 하나입니다.</dd></dl></article>
+    <article class="dc"><span class="id">D5</span><h3>모델 서버를 외부 GPU PC에</h3>
+      <dl><dt>대안</dt><dd>서버 PC에 함께 배치</dd><dt>이유</dt><dd>모델 담당자가 자기 환경에서 개발·실험합니다. GPU로 학습과 추론을 한곳에서 하고, K8s Node 2 역할을 미리 연습합니다.</dd></dl></article>
+    <article class="dc"><span class="id">D9</span><h3>기준자세는 compacted 토픽으로</h3>
+      <dl><dt>대안</dt><dd>추론 서비스가 Redis·MySQL 조회</dd><dt>이유</dt><dd>외부 PC에 Redis·MySQL 포트를 열지 않습니다. 추론 서비스는 Kafka에만 의존합니다.</dd></dl></article>
+    <article class="dc"><span class="id">D7</span><h3>새 인프라 추가 없음</h3>
+      <dl><dt>대안</dt><dd>Kafka Connect, Eureka, Config Server</dd><dt>이유</dt><dd>적재는 Spark <code>availableNow</code>, 서비스 탐색은 Docker DNS, 설정은 환경변수로 대체합니다. 일정과 메모리를 아낍니다.</dd></dl></article>
+    <article class="dc"><span class="id">D8</span><h3>모듈러 모놀리스 → MSA</h3>
+      <dl><dt>대안</dt><dd>처음부터 서비스 5개</dd><dt>이유</dt><dd>패키지 경계를 Kafka 이벤트로만 연결해 두면 2단계-B 분리가 기계적인 작업이 됩니다.</dd></dl></article>
+    <article class="dc"><span class="id">D1</span><h3>전용 서버 PC에 Ubuntu Server</h3>
+      <dl><dt>대안</dt><dd>VirtualBox VM, Windows + WSL2</dd><dt>이유</dt><dd>가상화 계층 없이 약 15GB를 씁니다. 실습실 리눅스·K8s 환경과 가깝고 팀원이 IP로 바로 접속합니다.</dd></dl></article>
+    <article class="dc"><span class="id">D6</span><h3>MySQL은 외부 유지</h3>
+      <dl><dt>대안</dt><dd>서버 PC로 이전</dd><dt>이유</dt><dd>서버 PC 장애와 영속 데이터를 분리합니다.</dd></dl></article>
+  </div>
+</section>
+
+<section aria-labelledby="h-pipe">
+  <div class="sec-head">
+    <span class="eyebrow">파이프라인</span>
+    <h2 id="h-pipe">데이터가 흐르는 다섯 갈래</h2>
+    <p class="lede">실시간 경로 하나, 적재·분석 경로 셋, 그리고 사용자당 한 번 일어나는 캘리브레이션입니다. 각 카드의 단계는 실제 처리 순서입니다.</p>
+  </div>
+
+  <div class="pipes">
+    <article class="pipe" id="p-cal">
+      <div class="pipe-head">
+        <div class="left"><h3>캘리브레이션</h3><span class="lane n">요청·이벤트</span><span class="when">사용자당 1회, 재측정 시 반복</span></div>
+        <button class="linkbtn" data-k="cal">다이어그램에서 보기</button>
+      </div>
+      <div class="pipe-body">
+        <ol class="steps">
+          <li>FE가 정자세 약 5초 분량의 키포인트를 측정해 <code>POST /api/baselines</code>로 보냅니다.</li>
+          <li>gateway가 JWT를 확인하고 user-service로 넘깁니다.</li>
+          <li>user-service가 관절별 평균·표준편차를 계산해 MySQL <code>baselines</code>에 저장합니다(version +1).</li>
+          <li>같은 값을 <code>posture.baselines</code>(compacted, key=userId)에 발행합니다.</li>
+          <li>추론 서비스가 토픽을 구독하다가 메모리 캐시를 갱신합니다.</li>
+        </ol>
+        <div class="side">
+          <div><h4>왜 이 방식인가</h4><p>기준값은 작고 반드시 남아야 하는 데이터라 스트림이 아니라 REST로 받고 MySQL에 원본을 둡니다. 추론 쪽에는 Kafka 복제본만 전달합니다.</p></div>
+          <div><h4>회원 탈퇴</h4><p>MySQL 삭제와 함께 같은 키로 value가 null인 tombstone을 발행하면 토픽에서도 지워집니다.</p></div>
+        </div>
+      </div>
+    </article>
+
+    <article class="pipe" id="p-rt">
+      <div class="pipe-head">
+        <div class="left"><h3>실시간 판정</h3><span class="lane h">실시간 경로</span><span class="when">사용자당 0.5초마다 · 목표 지연 1초 이내</span></div>
+        <button class="linkbtn" data-k="rt">다이어그램에서 보기</button>
+      </div>
+      <div class="pipe-body">
+        <ol class="steps">
+          <li>FE가 15fps로 키포인트를 뽑아 0.5초 분량씩 묶어 WebSocket으로 보냅니다.</li>
+          <li>realtime-service가 형식을 검증하고 <code>posture.keypoints</code>에 발행합니다. 키가 userId라 사용자별 순서가 보장됩니다.</li>
+          <li>GPU PC의 추론 서비스가 사용자·세션별로 3초 윈도우를 채우고, 0.5초마다 LSTM으로 good/bad를 분류해 <code>posture.inference</code>에 발행합니다.</li>
+          <li>realtime-service가 결과로 Redis의 상태머신을 갱신합니다.</li>
+          <li>알림이 필요하면 Redis Pub/Sub으로 사용자가 연결된 인스턴스에 전달해 WebSocket으로 푸시하고, <code>posture.episodes</code>를 발행합니다. report-service가 이를 받아 MySQL에 기록합니다.</li>
+        </ol>
+        <div class="side">
+          <div class="budget">
+            <h4>지연 예산 (1초 기준 눈금)</h4>
+            <div class="bar" role="img" aria-label="예상 지연 600ms, 목표 1000ms">
+              <i style="width:50%"></i><i style="width:1%"></i><i style="width:3%"></i><i style="width:2%"></i><i style="width:3%"></i><i style="width:1%"></i>
+            </div>
+            <div class="scale"><span>0</span><span>500ms</span><span>1000ms</span></div>
+            <div class="blist">
+              <span>FE 묶음 대기</span><span>≤ 500</span>
+              <span>WebSocket 전송</span><span>~10</span>
+              <span>Kafka → 추론 서비스</span><span>~30</span>
+              <span>LSTM 추론(GPU)</span><span>~20</span>
+              <span>Kafka → realtime</span><span>~30</span>
+              <span>상태머신 · 푸시</span><span>~10</span>
+              <span class="tot">합계</span><span class="tot">~600</span>
+            </div>
+          </div>
+          <div><h4>상태머신 (알림은 이걸로 판단)</h4>
+            <div class="states"><span class="s">NORMAL</span><span class="a">→</span><span class="s">SUSPECT</span><span class="a">T1 10초→</span><span class="s b">BAD</span><span class="a">→</span><span class="s">RECOVERING</span><span class="a">T2 5초→</span><span class="s">NORMAL</span></div>
+            <p style="margin-top:6px;color:var(--muted);font-size:13px">BAD 상태에서는 T3(60초)마다 재알림. 순간적인 오판정 하나로 알림이 울리지 않습니다.</p></div>
+          <div><h4>GPU PC가 멈추면</h4><p>5초간 결과가 없으면 FE에 “분석 일시 중단”을 표시합니다. 같은 추론 이미지를 서버 PC에서 CPU로 띄우고 Kafka 주소만 <code>kafka:19092</code>로 바꿉니다.</p></div>
+        </div>
+      </div>
+    </article>
+
+    <article class="pipe" id="p-load">
+      <div class="pipe-head">
+        <div class="left"><h3>적재</h3><span class="lane c">적재·분석 경로</span><span class="when">매시간 · Spark J1</span></div>
+        <button class="linkbtn" data-k="load">다이어그램에서 보기</button>
+      </div>
+      <div class="pipe-body">
+        <ol class="steps">
+          <li>cron이 <code>docker exec spark spark-submit</code>으로 J1을 실행합니다.</li>
+          <li>J1이 keypoints·inference·episodes 세 토픽을 지난번 체크포인트 이후 오프셋부터 읽습니다.</li>
+          <li>HDFS <code>/data/raw/&lt;토픽&gt;/dt=…/hour=…/</code>에 Parquet로 씁니다.</li>
+          <li>체크포인트를 갱신하고 종료합니다.</li>
+        </ol>
+        <div class="side">
+          <div><h4>왜 <code>availableNow</code>인가</h4><p>Structured Streaming을 쌓인 데이터만 처리하고 끝나게 실행합니다. Spark가 상주하지 않아 메모리를 잡 실행 중에만 쓰고, 오프셋은 체크포인트가 관리해 중복·누락이 없습니다.</p></div>
+          <div><h4>실패하면</h4><p>Kafka 보존 기간이 48시간이라 그 안에 다시 실행하면 체크포인트부터 이어서 적재합니다. 실시간 판정에는 영향이 없습니다.</p></div>
+        </div>
+      </div>
+    </article>
+
+    <article class="pipe" id="p-train">
+      <div class="pipe-head">
+        <div class="left"><h3>학습 · 모델 배포</h3><span class="lane c">적재·분석 경로</span><span class="when">매일 02:00 또는 수동 · Spark J2 + GPU PC</span></div>
+        <button class="linkbtn" data-k="train">다이어그램에서 보기</button>
+      </div>
+      <div class="pipe-body">
+        <ol class="steps">
+          <li>Spark J2가 원본 키포인트를 정제·윈도우 분할하고 라벨과 결합해 <code>/data/curated/train/v{n}/</code>을 만듭니다.</li>
+          <li>GPU PC 학습 환경이 WebHDFS로 학습셋을 읽어 LSTM을 학습·검증합니다.</li>
+          <li>모델 파일과 <code>meta.json</code>을 <code>/models/v{n}/</code>에 올리고 MySQL <code>model_versions</code>에 등록합니다.</li>
+          <li>추론 서비스가 같은 PC의 로컬 모델 파일을 새 버전으로 교체해 불러옵니다.</li>
+          <li>이후 추론 결과에는 <code>modelVersion: "v{n}"</code>이 붙어 에피소드 기록까지 추적됩니다.</li>
+        </ol>
+        <div class="side">
+          <div><h4>버전 규칙</h4><p>모델 버전 v{n} = HDFS 경로 = 메시지의 <code>modelVersion</code> = MySQL <code>model_versions</code>. 어떤 판정이 어떤 모델에서 나왔는지 끝까지 따라갈 수 있습니다.</p></div>
+          <div><h4>배포 형태</h4><p>추론 서비스는 Dockerfile과 requirements.txt를 반드시 남깁니다. 서버 PC 대체 실행과 K8s Node 2 배포에 그대로 씁니다.</p></div>
+        </div>
+      </div>
+    </article>
+
+    <article class="pipe" id="p-mart">
+      <div class="pipe-head">
+        <div class="left"><h3>통계 마트</h3><span class="lane c">적재·분석 경로</span><span class="when">매일 03:00 · Spark J3</span></div>
+        <button class="linkbtn" data-k="mart">다이어그램에서 보기</button>
+      </div>
+      <div class="pipe-body">
+        <ol class="steps">
+          <li>Spark J3가 HDFS <code>/data/raw/episodes</code>를 읽어 사용자·일 단위로 집계합니다.</li>
+          <li>JDBC로 MySQL <code>mart_daily_posture</code>에 씁니다.</li>
+          <li>report-service가 마트를 SQL로 조회해 통계 API로 제공합니다.</li>
+          <li>FE 기록 화면이 gateway를 거쳐 이 API를 호출합니다.</li>
+        </ol>
+        <div class="side">
+          <div><h4>기록과 통계의 차이</h4><p>개별 에피소드는 report-service가 Kafka에서 바로 받아 저장하므로 즉시 보입니다. 일별·주별 통계만 J3 배치를 거칩니다.</p></div>
+          <div><h4>시연 중 주의</h4><p>J2·J3는 CPU·메모리를 많이 쓰므로 시연 시간에는 실행하지 않습니다. Spark는 <code>local[4]</code>로 제한해 실시간 처리용 CPU를 남깁니다.</p></div>
+        </div>
+      </div>
+    </article>
+  </div>
+</section>
+
+<section aria-labelledby="h-fail">
+  <div class="sec-head">
+    <span class="eyebrow">장애 격리</span>
+    <h2 id="h-fail">어디가 멈추면 무엇이 멈추나</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>멈춘 곳</th><th>위치</th><th>실시간 판정</th><th>대응</th></tr></thead>
+      <tbody>
+        <tr><td>GPU PC</td><td>외부</td><td>중단</td><td>5초 무응답 감지 후 FE에 표시, 서버 PC에서 CPU 추론 이미지로 대체</td></tr>
+        <tr><td>HDFS · Spark</td><td>내부</td><td>영향 없음</td><td>48시간 안에 복구하면 J1이 체크포인트부터 이어서 적재</td></tr>
+        <tr><td>MySQL</td><td>외부</td><td>진행 중 세션은 계속</td><td>로그인·조회만 불가. 에피소드는 Kafka에 7일 보존, 복구 후 report-service가 이어서 저장</td></tr>
+        <tr><td>Redis</td><td>내부</td><td>알림 중단</td><td>재시작 후 상태를 NORMAL부터 다시 시작</td></tr>
+        <tr><td>Kafka</td><td>내부</td><td>중단</td><td><code>restart: unless-stopped</code>로 자동 재시작, FE 재연결</td></tr>
+        <tr><td>서버 PC 재부팅</td><td>내부</td><td>중단</td><td>Docker 자동 시작, BIOS 전원 복구 자동 켜짐</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<footer>
+  <span>세부 명세: <span class="mono">Posture_Architecture_v4.md</span> · 메시지 형식: <span class="mono">Kafka_메시지_규격_v1.md</span> · 일정·파트별 할 일: <span class="mono">전체_설계안_v4.md</span></span>
+  <span>fps, 윈도우 크기, T1·T2·T3 같은 수치는 회의 확정 전 초안 값입니다.</span>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var svg = document.getElementById('arch');
+  var els = svg.querySelectorAll('[data-p]');
+  var chips = document.querySelectorAll('.chip');
+  var cap = document.getElementById('caption');
+  var text = {
+    all: '<b>전체 구성.</b> 위 버튼으로 파이프라인을 고르면 그 흐름에 쓰이는 구성요소만 강조됩니다.',
+    cal: '<b>캘리브레이션.</b> FE → gateway → user-service → MySQL 저장 + posture.baselines 발행 → 추론 서비스 캐시 갱신.',
+    rt: '<b>실시간 판정.</b> FE → realtime-service → Kafka → 추론(GPU PC) → Kafka → 상태머신(Redis) → FE 알림. 경계는 8080과 9094에서만 넘습니다.',
+    load: '<b>적재.</b> cron이 매시간 Spark J1을 실행해 Kafka 세 토픽을 HDFS에 Parquet로 쌓습니다.',
+    train: '<b>학습·모델.</b> Spark J2가 학습셋을 만들고, GPU PC가 WebHDFS(9870·9864)로 읽어 학습한 뒤 모델을 올립니다.',
+    mart: '<b>통계 마트.</b> Spark J3가 에피소드를 집계해 MySQL 마트에 쓰고, report-service가 조회 API로 제공합니다.'
+  };
+  function show(k) {
+    svg.classList.toggle('focus', k !== 'all');
+    els.forEach(function (el) {
+      el.classList.toggle('on', el.getAttribute('data-p').split(' ').indexOf(k) > -1);
+    });
+    chips.forEach(function (c) { c.setAttribute('aria-pressed', c.dataset.k === k ? 'true' : 'false'); });
+    cap.innerHTML = text[k] || text.all;
+  }
+  chips.forEach(function (c) { c.addEventListener('click', function () { show(c.dataset.k); }); });
+  document.querySelectorAll('.linkbtn').forEach(function (b) {
+    b.addEventListener('click', function () {
+      show(b.dataset.k);
+      document.getElementById('diagram').scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+    });
+  });
+})();
+</script>
+
+</body></html>

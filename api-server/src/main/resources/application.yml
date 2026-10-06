@@ -8,7 +8,12 @@ spring:
   # 외부 로컬 환경에 구축된 MySQL에 접속한다 (컨테이너화하지 않음).
   # DB_HOST/DB_PORT 등은 .env 파일(compose의 env_file)로 주입된다.
   datasource:
-    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:posture_app}?useSSL=false&serverTimezone=Asia/Seoul
+    # allowPublicKeyRetrieval=true (2026-10-06, T-11 장애 원인): MySQL 8 기본 인증(caching_sha2_password)은
+    # 서버의 인증 캐시가 비어 있을 때(MySQL 재시작 직후 등) 비밀번호를 RSA 공개키로 암호화해 보내야 하는데,
+    # useSSL=false에서는 Connector/J가 공개키 요청을 기본으로 막아 새 연결이 전부
+    # "Public Key Retrieval is not allowed"로 실패했다. 테스트 LAN 환경이라 허용한다.
+    # 운영(신뢰할 수 없는 네트워크)에서는 대신 sslMode=REQUIRED로 TLS 연결을 쓴다.
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:posture_app}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Seoul
     username: ${DB_USER:posture_app}
     password: ${DB_PASSWORD:}
     driver-class-name: com.mysql.cj.jdbc.Driver
@@ -17,7 +22,20 @@ spring:
       # (연결 재시도는 /actuator/health 가 계속 감시)
       initialization-fail-timeout: -1
       connection-timeout: 5000
-      maximum-pool-size: 5
+      # (D-15) 동시에 DB를 쓰는 주체: posture.inference 컨슈머 스레드(기본 3)
+      # + 세션 만료 스케줄러(1) + 헬스체크(1) = 5. 여유를 두어 8.
+      # 컨슈머 concurrency를 올리면 이 값도 함께 올린다(DB max_connections=151).
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:8}
+      # (D-11) 기본값에 기대지 않고 커넥션 수명 관련 값을 명시한다.
+      pool-name: posture-app-pool
+      # 커넥션 최대 수명 30분 — DB의 wait_timeout(기본 8시간)보다 반드시 짧게.
+      # DB가 먼저 끊은 커넥션을 풀이 꺼내 쓰다 실패하는 일을 막는다.
+      max-lifetime: 1800000
+      # 유휴 커넥션에 5분마다 가벼운 ping — 공유기/방화벽이 오래 놀던 TCP
+      # 연결을 조용히 끊는 경우를 대비. max-lifetime보다 짧아야 한다.
+      keepalive-time: 300000
+      # 커넥션 유효성 검사 대기 상한 (connection-timeout보다 짧게)
+      validation-timeout: 3000
 
   data:
     redis:
@@ -33,12 +51,41 @@ spring:
       # 단일 브로커(KRaft) 테스트 환경 기준. 컨트롤러가 죽지 않는 한 재시도로 충분.
       acks: all
       retries: 3
+    consumer:
+      # posture-cep(Python)이 쓰던 설정과 동일하게 맞춘다 — PostureInferenceConsumer
+      # (D-13)가 posture.inference를 구독한다. 테스트 단계라 earliest 유지.
+      group-id: ${POSTURE_INFERENCE_CONSUMER_GROUP:api-server-cep}
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
 
 # 애플리케이션 자체 설정 (posture 도메인)
 app:
   kafka:
     topic:
       posture-summary: ${POSTURE_SUMMARY_TOPIC:posture.summary}
+      posture-inference: ${POSTURE_INFERENCE_TOPIC:posture.inference}
+    # (D-15) posture.inference 컨슈머 스레드 수 = 토픽 파티션 수와 맞출 것
+    posture-inference-concurrency: ${POSTURE_INFERENCE_CONCURRENCY:3}
+
+# posture-cep(Python) 상태머신을 이식하면서 그대로 옮긴 파라미터
+# (2026-10-02 아키텍처 v4 전환 결정, D-13). 값은 VM에서 이미 검증된
+# 지속(3s)/회복(3s)/재알림(60s)을 잠정 유지 — 팀 회의에서 다른 값으로
+# 확정되면 그때 바꾼다(아키텍처_v4_검토의견_2026-10-02.md 참고).
+cep:
+  persist-seconds: ${CEP_PERSIST_SECONDS:3}
+  recovery-seconds: ${CEP_RECOVERY_SECONDS:3}
+  realert-seconds: ${CEP_REALERT_SECONDS:60}
+  session-timeout-seconds: ${CEP_SESSION_TIMEOUT_SECONDS:300}
+  session-expiry-interval-seconds: ${CEP_SESSION_EXPIRY_INTERVAL_SECONDS:60}
+  # (D-04) 상태머신 상태를 Redis posture:state:{userId}(Hash)에 저장해 api-server
+  # 재시작 후에도 진행 중이던 판정을 이어간다. 키 TTL은 v4 설계(5.9절)대로 1시간.
+  # false면 기존처럼 메모리에만 둔다(Redis 장애 시에도 판정은 메모리로 계속됨).
+  # (D-16) /cep/events/recent 조회용으로 메모리에 남겨둘 최근 종료 이벤트 수
+  recent-events-capacity: ${CEP_RECENT_EVENTS_CAPACITY:1000}
+  state-store:
+    enabled: ${CEP_STATE_STORE_ENABLED:true}
+    ttl-seconds: ${CEP_STATE_TTL_SECONDS:3600}
 
 management:
   endpoints:
@@ -51,6 +98,18 @@ management:
       # 세 구성요소(db/redis/kafka) 각각의 상태를 개별적으로 노출한다.
       probes:
         enabled: true
+      # (D-11) 헬스 그룹 분리
+      #  - liveness  (/actuator/health/liveness):  "프로세스가 살아있나"만 본다.
+      #    컨테이너 헬스체크(docker-compose)와 향후 K8s livenessProbe가 쓴다.
+      #    외부 DB가 잠깐 끊겨도 컨테이너가 unhealthy/재시작되지 않게 하려는 것.
+      #  - readiness (/actuator/health/readiness): 트래픽을 받아도 되나 — DB/Redis
+      #    의존성까지 포함. 향후 K8s readinessProbe용.
+      #  - 전체(/actuator/health)는 지금처럼 모든 구성요소 상세를 보는 모니터링용.
+      group:
+        liveness:
+          include: livenessState
+        readiness:
+          include: readinessState,db,redis
   health:
     db:
       enabled: true
