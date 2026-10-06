@@ -8,7 +8,12 @@ spring:
   # 외부 로컬 환경에 구축된 MySQL에 접속한다 (컨테이너화하지 않음).
   # DB_HOST/DB_PORT 등은 .env 파일(compose의 env_file)로 주입된다.
   datasource:
-    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:posture_app}?useSSL=false&serverTimezone=Asia/Seoul
+    # allowPublicKeyRetrieval=true (2026-10-06, T-11 장애 원인): MySQL 8 기본 인증(caching_sha2_password)은
+    # 서버의 인증 캐시가 비어 있을 때(MySQL 재시작 직후 등) 비밀번호를 RSA 공개키로 암호화해 보내야 하는데,
+    # useSSL=false에서는 Connector/J가 공개키 요청을 기본으로 막아 새 연결이 전부
+    # "Public Key Retrieval is not allowed"로 실패했다. 테스트 LAN 환경이라 허용한다.
+    # 운영(신뢰할 수 없는 네트워크)에서는 대신 sslMode=REQUIRED로 TLS 연결을 쓴다.
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:posture_app}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Seoul
     username: ${DB_USER:posture_app}
     password: ${DB_PASSWORD:}
     driver-class-name: com.mysql.cj.jdbc.Driver
