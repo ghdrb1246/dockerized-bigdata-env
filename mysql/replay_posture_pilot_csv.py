@@ -29,6 +29,11 @@ CSV 컬럼 -> PostureSummaryRequest 매핑 (api-server DTO 기준):
   python3 replay_posture_pilot_csv.py --file posture-pilot-P01.csv \
       --api-url http://192.168.56.1:8080/api/v1/posture/summary --pace fast
 
+  # (T-11) 최대 동시 접속 측정 — 실제 클라이언트처럼 '지금' 시각으로 보내고,
+  # 실행마다 새 세션 ID를 쓴다(이전 실행의 세션·판정 상태와 섞이지 않게)
+  python3 replay_posture_pilot_csv.py --file load-300.csv --pace realtime \
+      --concurrency 20 --limit-sessions 120 --live-timestamps
+
   # 부하 테스트 (대용량 CSV, 세션 50개 동시)
   python3 replay_posture_pilot_csv.py --file posture-pilot-load-test.csv \
       --api-url http://192.168.56.1:8080/api/v1/posture/summary \
@@ -42,9 +47,10 @@ import json
 import statistics
 import sys
 import time
+import uuid
 from collections import OrderedDict, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple
 
 import requests
@@ -104,8 +110,14 @@ class SessionResult:
         self.status_counts: Dict[int, int] = defaultdict(int)
 
 
+def now_iso_millis() -> str:
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+
+
 def replay_session(
     session_id: str, rows: List[Dict[str, str]], api_url: str, pace: str, speed: float, timeout: float,
+    live_session_id: str = None,
 ) -> SessionResult:
     result = SessionResult(session_id)
     session = requests.Session()
@@ -113,12 +125,20 @@ def replay_session(
     prev_elapsed_ms = None
     for row in rows:
         payload, elapsed_ms = to_request_payload(row)
+        if live_session_id is not None:
+            # (T-11) --live-timestamps: 전송 순간의 시각과 이번 실행 전용 세션 ID 사용.
+            # CSV의 과거 시각(capturedAt)을 쓰면 세션 만료 작업(60초 주기, 300초 타임아웃)이
+            # 재생 중인 세션을 '오래된 세션'으로 계속 만료시켜 측정을 오염시킨다(D-17 참고).
+            payload["sessionId"] = live_session_id
 
         if pace == "realtime" and prev_elapsed_ms is not None:
             gap_seconds = max(0.0, (elapsed_ms - prev_elapsed_ms) / 1000.0 / speed)
             if gap_seconds > 0:
                 time.sleep(gap_seconds)
         prev_elapsed_ms = elapsed_ms
+
+        if live_session_id is not None:
+            payload["capturedAt"] = now_iso_millis()
 
         t0 = time.perf_counter()
         try:
@@ -153,6 +173,9 @@ def main() -> None:
     parser.add_argument("--concurrency", type=int, default=10, help="동시에 재생할 세션 수(스레드 수)")
     parser.add_argument("--timeout", type=float, default=10.0, help="요청당 타임아웃(초)")
     parser.add_argument("--limit-sessions", type=int, default=None, help="테스트용으로 앞에서 N세션만 재생")
+    parser.add_argument("--live-timestamps", action="store_true",
+                        help="capturedAt을 전송 시각(UTC)으로, sessionId를 실행마다 새 UUID로 바꿔 보낸다 "
+                             "(실제 클라이언트 흉내. 최대 동시 접속 측정 T-11용)")
     args = parser.parse_args()
 
     all_rows: List[Dict[str, str]] = []
@@ -167,13 +190,15 @@ def main() -> None:
 
     total_requests = sum(len(rows) for _, rows in session_items)
     print(f"[재생 시작] 세션 {len(session_items)}개, 총 {total_requests}건, "
-          f"동시성={args.concurrency}, pace={args.pace}, api={args.api_url}")
+          f"동시성={args.concurrency}, pace={args.pace}, api={args.api_url}"
+          + (", live-timestamps" if args.live_timestamps else ""))
 
     t0 = time.perf_counter()
     results: List[SessionResult] = []
     with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
         futures = [
-            pool.submit(replay_session, sid, rows, args.api_url, args.pace, args.speed, args.timeout)
+            pool.submit(replay_session, sid, rows, args.api_url, args.pace, args.speed, args.timeout,
+                        str(uuid.uuid4()) if args.live_timestamps else None)
             for sid, rows in session_items
         ]
         for fut in as_completed(futures):
